@@ -802,11 +802,11 @@ if status_json and not (metadata and annotations):
 if status_json:
     # st.write("Status response:", status_json). ##show the API json response
     if isinstance(status_json, dict) and status_json.get("error"):
-        st.error("Status call failed. See details above.")
+        st.error("Status call failed.")
     elif is_ready(status_json):
-        st.success("Job is ready. Data auto-loaded (if permissions allow).")
+        st.success("Job is ready. Data auto-loaded below.")
     else:
-        st.warning("Job is not ready yet. Click 'Check Status' again later.")
+        st.warning("Job is not ready yet. Check again later.")
 
 # If metadata/annotations already in state, proceed to pairs
 if metadata and annotations:
