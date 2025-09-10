@@ -1,0 +1,15 @@
+# Core app
+streamlit>=1.33.0
+
+# Slider for EO/IR comparison
+streamlit-image-comparison>=0.0.5
+
+# Images
+Pillow>=10.0.0
+
+# AWS S3 access
+boto3>=1.28.0
+
+# HTTP + data
+requests>=2.31.0
+pandas>=2.0.0

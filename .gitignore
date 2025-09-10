@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.ckpt
+.DS_Store
+.git
+*.pt
