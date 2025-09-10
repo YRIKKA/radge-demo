@@ -131,11 +131,21 @@ def read_json_from_s3(s3_uri: str, region_name: Optional[str]) -> dict:
 
 
 
+# @st.cache_data(show_spinner=False, max_entries=4096)
+# def get_image_bytes_from_s3(s3_uri: str, region_name: Optional[str]) -> bytes:
+#     bucket, key = parse_s3_uri(s3_uri)
+#     s3 = get_s3_client(region_name)
+#     obj = s3.get_object(Bucket=bucket, Key=key)
+#     return obj["Body"].read()
 @st.cache_data(show_spinner=False, max_entries=4096)
 def get_image_bytes_from_s3(s3_uri: str, region_name: Optional[str]) -> bytes:
     bucket, key = parse_s3_uri(s3_uri)
-    s3 = get_s3_client(region_name)
-    obj = s3.get_object(Bucket=bucket, Key=key)
+    try:
+        s3 = get_s3_client(region_name, anonymous=False)
+        obj = s3.get_object(Bucket=bucket, Key=key)
+    except (NoCredentialsError, ClientError):
+        s3 = get_s3_client(region_name, anonymous=True)
+        obj = s3.get_object(Bucket=bucket, Key=key)
     return obj["Body"].read()
 
 
