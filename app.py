@@ -111,13 +111,24 @@ def get_s3_client(region_name: Optional[str], anonymous: bool = False):
     return session.client("s3", config=cfg)
 
 
-@st.cache_data(show_spinner=False)
+# @st.cache_data(show_spinner=False)
+# def read_json_from_s3(s3_uri: str, region_name: Optional[str]) -> dict:
+#     bucket, key = parse_s3_uri(s3_uri)
+#     s3 = get_s3_client(region_name)
+#     obj = s3.get_object(Bucket=bucket, Key=key)
+#     data = obj["Body"].read()
+#     return json.loads(data)
 def read_json_from_s3(s3_uri: str, region_name: Optional[str]) -> dict:
     bucket, key = parse_s3_uri(s3_uri)
-    s3 = get_s3_client(region_name)
-    obj = s3.get_object(Bucket=bucket, Key=key)
+    try:
+        s3 = get_s3_client(region_name, anonymous=False)
+        obj = s3.get_object(Bucket=bucket, Key=key)
+    except NoCredentialsError:
+        s3 = get_s3_client(region_name, anonymous=True)
+        obj = s3.get_object(Bucket=bucket, Key=key)
     data = obj["Body"].read()
     return json.loads(data)
+
 
 
 @st.cache_data(show_spinner=False, max_entries=4096)
