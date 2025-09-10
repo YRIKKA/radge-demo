@@ -18,6 +18,7 @@ import uuid
 import pandas as pd
 import base64
 from streamlit_image_comparison import image_comparison
+from botocore import UNSIGNED
 
 
 # --------------------------
@@ -97,11 +98,17 @@ def parse_s3_uri(s3_uri: str) -> Tuple[str, str]:
     return bucket, key
 
 
+# @st.cache_resource(show_spinner=False)
+# def get_s3_client(region_name: Optional[str]):
+#     # Use default credential chain
+#     session = boto3.session.Session(region_name=region_name or None)
+#     return session.client("s3", config=Config(signature_version="s3v4"))
+
 @st.cache_resource(show_spinner=False)
-def get_s3_client(region_name: Optional[str]):
-    # Use default credential chain
+def get_s3_client(region_name: Optional[str], anonymous: bool = False):
     session = boto3.session.Session(region_name=region_name or None)
-    return session.client("s3", config=Config(signature_version="s3v4"))
+    cfg = Config(signature_version=UNSIGNED) if anonymous else Config(signature_version="s3v4")
+    return session.client("s3", config=cfg)
 
 
 @st.cache_data(show_spinner=False)
