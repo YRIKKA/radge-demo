@@ -39,44 +39,61 @@ IR_LABEL_BY_VALUE = {
 
 st.set_page_config(page_title="RADGE EO/IR Data Engine", layout="wide")
 
+st.session_state.pop("job_table_drawn", None)
+
+# --------------------------
+# Per-user ID + in-memory persistent store (reload-safe)
+# --------------------------
+import uuid
 
 
-# --- Bootstrap: if we have saved state in sessionStorage, push it back via a query param ---
-components.html(
-    """
-    <script>
-    (function () {
-      try {
-        // Reset flags on a hard reload so we can restore exactly once per reload
-        var nav = (performance.getEntriesByType && performance.getEntriesByType('navigation')[0]) || null;
-        var isReload = nav ? nav.type === 'reload'
-                           : (performance && performance.navigation && performance.navigation.type === 1);
-        if (isReload) {
-          sessionStorage.removeItem('radge_restored');
-          sessionStorage.removeItem('radge_push_inflight');
-          sessionStorage.removeItem('radge_first_run_done');   // <-- ADD THIS
-        }
+def _get_client_id() -> str:
+    # 1) try URL param
+    cid = None
+    try:
+        qp = st.query_params
+        cid = qp.get("radge_client")
+        if isinstance(cid, list):
+            cid = cid[0]
+    except Exception:
+        cid = None
 
-        const url = new URL(window.location.href);
-        const hasToken = url.searchParams.has('radge_restore');
-        const already  = sessionStorage.getItem('radge_restored') === '1';
-        const raw      = sessionStorage.getItem('radge_state');
+    # 2) fallback to session_state (prevents minting a new ID if URL briefly lacks it)
+    if not cid:
+        cid = st.session_state.get("_radge_client")
 
-        // Push a restore token only once per reload
-        if (!hasToken && raw && !already) {
-          sessionStorage.setItem('radge_push_inflight', '1');
-          const b64 = btoa(unescape(encodeURIComponent(raw)));
-          window.parent.postMessage({
-            type: "streamlit:setQueryParams",
-            queryParams: { radge_restore: b64 }
-          }, "*");
-        }
-      } catch (e) { /* no-op */ }
-    })();
-    </script>
-    """,
-    height=0,
-)
+    # 3) mint + persist if still missing
+    if not cid:
+        cid = str(uuid.uuid4())
+        try:
+            st.query_params["radge_client"] = cid  # >=1.30
+        except Exception:
+            st.experimental_set_query_params(radge_client=cid)  # legacy
+        st.session_state["_radge_client"] = cid
+        st.rerun()
+
+    # keep in session_state for future fallbacks
+    st.session_state["_radge_client"] = cid
+    return cid
+
+
+CLIENT_ID = _get_client_id()
+
+
+@st.cache_resource(show_spinner=False)
+def _global_store():
+    # { client_id: {"job_history": [], "selected_job_id": None, "seeded": False} }
+    return {}
+
+def _user_store():
+    store = _global_store()
+    if CLIENT_ID not in store:
+        store[CLIENT_ID] = {"job_history": [], "selected_job_id": None, "seeded": False}
+    return store[CLIENT_ID]
+
+
+
+
 
 
 
@@ -131,12 +148,7 @@ def read_json_from_s3(s3_uri: str, region_name: Optional[str]) -> dict:
 
 
 
-# @st.cache_data(show_spinner=False, max_entries=4096)
-# def get_image_bytes_from_s3(s3_uri: str, region_name: Optional[str]) -> bytes:
-#     bucket, key = parse_s3_uri(s3_uri)
-#     s3 = get_s3_client(region_name)
-#     obj = s3.get_object(Bucket=bucket, Key=key)
-#     return obj["Body"].read()
+
 @st.cache_data(show_spinner=False, max_entries=4096)
 def get_image_bytes_from_s3(s3_uri: str, region_name: Optional[str]) -> bytes:
     bucket, key = parse_s3_uri(s3_uri)
@@ -399,7 +411,6 @@ def attempt_auto_load_from_status(status_json: dict, region_name: Optional[str])
 
 
 # Keys we’ll persist in the browser for this tab
-# PERSIST_KEYS = ["job_history", "selected_job_id", "job_id"]  # add/remove as you like
 PERSIST_KEYS = ["job_history", "selected_job_id", "job_id", "seeded_history"]
 
 def _export_state_for_browser() -> dict:
@@ -416,32 +427,36 @@ def _import_state_from_browser(data: dict):
 # --------------------------
 # Job History (session) utils
 # --------------------------
+
+
 def _ensure_history():
-    if "job_history" not in st.session_state:
-        st.session_state["job_history"] = []  # list of dicts
+    # Keep session_state view in sync with the cached store
+    st.session_state["job_history"] = _user_store()["job_history"]
 
 def add_job_to_history(job_id: str, description: str, labels: List[str], ir_sensor_type: Optional[str]):
-    _ensure_history()
-    st.session_state["job_history"].append({
+    data = _user_store()
+    data["job_history"].append({
         "job_id": job_id,
         "scene_description": description,
         "labels": ", ".join(labels or []),
         "sensor_type": IR_LABEL_BY_VALUE.get(ir_sensor_type, str(ir_sensor_type)),
         "created_at": pd.Timestamp.utcnow().isoformat(timespec="seconds") + "Z",
     })
+    # mirror into session_state for your table logic
+    st.session_state["job_history"] = data["job_history"]
 
 def get_history_df() -> pd.DataFrame:
     _ensure_history()
-    if not st.session_state["job_history"]:
+    hist = st.session_state.get("job_history", [])
+    if not hist:
         return pd.DataFrame(columns=["Select","job_id","scene_description","labels","sensor_type","created_at"])
-    df = pd.DataFrame(st.session_state["job_history"])
-    # Prepend a 'Select' column for interactive selection
+    df = pd.DataFrame(hist)
     df.insert(0, "Select", False)
-    # Reflect current selection
     sel_id = st.session_state.get("selected_job_id")
     if sel_id is not None and sel_id in list(df["job_id"]):
         df.loc[df["job_id"] == sel_id, "Select"] = True
     return df
+
 
 def seed_history_once():
     """Seed the session job history with a few hard-coded jobs (runs only once)."""
@@ -479,107 +494,6 @@ def seed_history_once():
 
 
 
-
-
-
-# Read the restore payload (works on both new/old Streamlit)
-try:
-    try:
-        qp = st.query_params  # new API
-        restore_token = qp.get("radge_restore")
-    except Exception:
-        restore_token = st.experimental_get_query_params().get("radge_restore", [None])[0]
-except Exception:
-    restore_token = None
-
-
-
-
-if restore_token and not st.session_state.get("_restored_from_browser", False):
-    try:
-        if isinstance(restore_token, list):
-            restore_token = restore_token[0]
-
-        payload = json.loads(base64.b64decode(restore_token).decode("utf-8"))
-        _import_state_from_browser(payload)  # or your explicit normalization + assignments
-        st.session_state["_restored_from_browser"] = True
-
-        # Clear the param server-side so next run has a clean URL
-        try:
-            st.query_params.clear()
-        except Exception:
-            try:
-                st.experimental_set_query_params()
-            except Exception:
-                pass
-
-        # IMPORTANT: finalize the restore on the client and drop the inflight lock
-        components.html(
-            """
-            <script>
-            (function () {
-              try {
-                const url = new URL(window.location.href);
-                url.searchParams.delete('radge_restore');
-                window.history.replaceState({}, '', url.toString());
-                sessionStorage.setItem('radge_restored','1');
-                sessionStorage.removeItem('radge_push_inflight');
-              } catch (e) {}
-            })();
-            </script>
-            """,
-            height=0,
-        )
-
-        # Now rerun so the UI rebuilds from the restored session_state
-        st.rerun()
-
-    except Exception as e:
-        st.warning(f"Restore failed: {e}")
-
-
-# if restore_token and not st.session_state.get("_restored_from_browser", False):
-#     try:
-#         # Handle both string and list forms just in case
-#         if isinstance(restore_token, list):
-#             restore_token = restore_token[0]
-
-#         payload = json.loads(base64.b64decode(restore_token).decode("utf-8"))
-#         _import_state_from_browser(payload)
-#         st.caption(f"restored rows: {len(st.session_state.get('job_history', []))}")
-
-#         st.session_state["_restored_from_browser"] = True
-
-#         # Clear the param server-side
-#         try:
-#             st.query_params.clear()
-#         except Exception:
-#             try:
-#                 st.experimental_set_query_params()
-#             except Exception:
-#                 pass
-
-#         # Clear it in the URL and finalize flags in the browser
-#         components.html(
-#             """
-#             <script>
-#             (function () {
-#               try {
-#                 const url = new URL(window.location.href);
-#                 url.searchParams.delete('radge_restore');
-#                 window.history.replaceState({}, '', url.toString());
-#                 // Mark restore completed and clear the inflight lock
-#                 sessionStorage.setItem('radge_restored','1');
-#                 sessionStorage.removeItem('radge_push_inflight');
-#               } catch (e) {}
-#             })();
-#             </script>
-#             """,
-#             height=0,
-#         )
-#     except Exception as e:
-#         # Optional: surface a hint if decoding fails
-#         st.warning(f"Restore failed: {e}")
 
 
 def show_pair_slider(eo_img: Image.Image, ir_img: Image.Image, file_name: str, idx: int):
@@ -665,23 +579,32 @@ if submit_clicked:
     with st.spinner("Submitting job..."):
         resp = submit_job(create_url, api_key, job_id, description, int(num_images), labels, ir_sensor_type)
     # st.write("Create response:", resp). ##prints out the json response frmo the API
-    st.success(f"Submitted job_id: {job_id}")
+    # st.success(f"Submitted job_id: {job_id}")
     st.session_state["job_id"] = job_id
 
     try:
         add_job_to_history(job_id, description, labels, ir_sensor_type)
     except Exception:
         pass
+    #Reset the table widget and rerun so only one fresh instance renders
+    st.session_state.pop("job_history_editor", None)
+    st.toast(f"Submitted job {job_id}", icon="✅")
+    st.rerun()
 
 
 st.divider()
 # If we already have a non-empty job history (e.g., from restore), skip seeding
-if not st.session_state.get("job_history"):
-    seed_history_once()
+
+_store = _user_store()
+if not _store["seeded"]:
+    seed_history_once()       # uses add_job_to_history(...), which writes into the store
+    _store["seeded"] = True
+    st.session_state.pop("job_history_editor", None)  # optional but tidy
 
 # seed_history_once()
 st.subheader("2) View Job History")
 df_hist = get_history_df()
+
 if df_hist.empty:
     st.info("No jobs submitted in this session yet. Submit a job to see it here.")
 else:
@@ -693,9 +616,17 @@ else:
 
     # Dynamic key resets editor state when selection changes
     hist_len = len(st.session_state.get("job_history", []))
-    edited = st.data_editor(
+    table_slot = st.empty()
+
+    # Before creating the editor:
+
+    if "job_table_drawn" in st.session_state:
+        st.stop()  # prevent a second render in this run
+    st.session_state["job_table_drawn"] = True
+
+    edited = table_slot.data_editor(
         df_hist,
-        key=f"job_history_editor_{st.session_state.get('selected_job_id') or 'none'}_{hist_len}",
+        key="job_history_editor",          # <— STABLE
         hide_index=True,
         use_container_width=True,
         disabled=["job_id","scene_description","labels","sensor_type","created_at"],
@@ -709,21 +640,7 @@ else:
         num_rows="fixed",
     )
 
-    # edited = st.data_editor(
-    #     df_hist,
-    #     key=f"job_history_editor_{current_sel or 'none'}",
-    #     hide_index=True,
-    #     use_container_width=True,
-    #     disabled=["job_id","scene_description","labels","sensor_type","created_at"],
-    #     column_config={
-    #         "Select": st.column_config.CheckboxColumn(required=False, help="Click to load this job"),
-    #         "scene_description": st.column_config.TextColumn("Scene Description", width="medium"),
-    #         "labels": st.column_config.TextColumn("Labels"),
-    #         "sensor_type": st.column_config.TextColumn("IR Sensor"),
-    #         "created_at": st.column_config.DatetimeColumn("Created (UTC)", format="YYYY-MM-DD HH:mm"),
-    #     },
-    #     num_rows="fixed",
-    # )
+
 
     # Read current selection from the edited table
     sel_rows = edited.index[edited["Select"] == True].tolist() if "Select" in edited.columns else []
@@ -733,6 +650,11 @@ else:
     if new_sel != current_sel:
         st.session_state["selected_job_id"] = new_sel
         st.session_state["job_id"] = new_sel
+        # NEW: persist this per-user
+        _user_store()["selected_job_id"] = new_sel
+
+        # Reset the editor widget so the single-select checkbox reflects the new selection
+        st.session_state.pop("job_history_editor", None)
 
         if new_sel:
             with st.spinner(f"Loading job {new_sel} ..."):
@@ -834,6 +756,7 @@ if metadata and annotations:
     pairs_to_show = min(pairs_to_show, total_pairs)
 
     # ---------------- Infinite scroll (always on) ----------------
+
     components.html(
         """
         <script>
@@ -848,15 +771,16 @@ if metadata and annotations:
             if (pending) return;
             if (nearBottom()) {
             pending = true;
-            // Ask Streamlit to update query params -> rerun
             try {
+                // Merge existing URL params (e.g., radge_client) with autoload
+                const url = new URL(window.location.href);
+                const params = Object.fromEntries(url.searchParams.entries());
+                params.autoload = Date.now().toString();
                 window.parent.postMessage({
                 type: "streamlit:setQueryParams",
-                queryParams: { autoload: Date.now().toString() }
+                queryParams: params
                 }, "*");
-            } catch (e) {
-                // ignore
-            }
+            } catch (e) {}
             setTimeout(() => { pending = false; }, 800);
             }
         }, true);
@@ -865,6 +789,9 @@ if metadata and annotations:
         """,
         height=0,
     )
+
+
+
 
     # On rerun triggered by query param change, bump the number of pairs to show
     qp = st.query_params
@@ -954,32 +881,3 @@ else:
 _state_obj = _export_state_for_browser()
 _state_json = json.dumps(_state_obj)
 
-components.html(
-    f"""
-    <script>
-    (function() {{
-      try {{
-        const incoming = {_state_json};
-
-        // If we already have a browser snapshot and this is the very first run
-        // after a hard reload, skip saving once to avoid overwriting the good snapshot.
-        const hasSnapshot = !!sessionStorage.getItem('radge_state');
-        const firstRun    = sessionStorage.getItem('radge_first_run_done') !== '1';
-        const shouldSkip  = firstRun && hasSnapshot;
-
-        if (!shouldSkip) {{
-          sessionStorage.setItem('radge_state', JSON.stringify(incoming));
-        }}
-
-        // Mark that we've completed the first run (so future runs always save).
-        if (firstRun) {{
-          sessionStorage.setItem('radge_first_run_done', '1');
-        }}
-      }} catch (e) {{}}
-    }})();
-    </script>
-    """,
-    height=0,
-)
-
-# st.caption(f"rows in session_state.job_history: {len(st.session_state.get('job_history', []))}")
